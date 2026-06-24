@@ -42,6 +42,20 @@ The two places that *looked* like they needed heavy models are replaced:
 - **Context safety**: unbounded recall compiles to **~1.2M tokens**; with the
   `max_results` + `token_budget` guards it stays at **~450 tokens**.
 
+### On-disk, on-demand (LMDB)
+
+For corpora too big to keep in RAM, persist to an **LMDB** memory-mapped backend
+(`mem.save(path)` / `NebulaMem.open_disk(path)`). Queries demand-page only the
+postings of the query terms plus the content/adjacency of fired nodes — the full
+index is never resident. Indexing the **entire** [sub2api](https://github.com/Wei-Shaw/sub2api)
+project (2,324 files → 50,133 chunks) and running 2,000 comment→code queries:
+
+- **file recall@30 = 97.9%** (@20 = 94.9%)
+- only **~0.06%** of chunk content materialized per query
+
+LMDB (not SQLite) because retrieval is a hand-built inverted index — a pure
+key-lookup access pattern that a memory-mapped B+tree serves on-demand.
+
 Full tables, the recall/precision operating curve, and the honest trade-offs are
 in [`docs/BENCHMARK.md`](docs/BENCHMARK.md).
 

@@ -128,8 +128,11 @@ def build_index(root, db_path, file_limit=None):
 
 def test_recall(db_path, queries, total_chunks, sample, ks=(1, 3, 5, 10, 20, 30)):
     mem = NebulaMem.open_disk(db_path)
-    cfg = SpreadingActivationConfig(seed_limit=15, steps=2, decay=0.7,
-                                    fire_threshold=0.04, max_results=max(ks))
+    # For direct lookup, seeds must fill the result set (seed_limit >= max_results)
+    # so lexically-ranked hits are not displaced by cascade neighbours; cascade is
+    # for multi-hop, not single-shot retrieval.
+    cfg = SpreadingActivationConfig(seed_limit=max(ks), steps=1, decay=0.6,
+                                    fire_threshold=0.02, max_results=max(ks))
     import random
     qs = queries if len(queries) <= sample else [queries[i] for i in
           range(0, len(queries), max(1, len(queries) // sample))][:sample]
