@@ -68,6 +68,8 @@ class SpreadingActivationConfig:
     # output control
     max_results: int = 10         # hard cap on returned nodes
     token_budget: Optional[int] = None  # cap compiled-context size (approx tokens)
+    per_cluster_cap: Optional[int] = None  # max nodes kept per concept-cluster (precision)
+    energy_gap_ratio: Optional[float] = None  # drop nodes below ratio*top_energy (precision)
 
     # fusion of lexical vs self-developed semantic (random-indexing) seed scores
     semantic_weight: float = 0.0  # 0 = pure lexical; >0 blends RI cosine

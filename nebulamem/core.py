@@ -45,11 +45,15 @@ class NebulaMem:
     def register_memory(self, node_id: str, content: str,
                         node_type: MemoryNodeType = MemoryNodeType.FACT,
                         extra_entities: Optional[List[str]] = None,
+                        cluster: Optional[str] = None,
                         auto_link: bool = True) -> None:
+        # `cluster` is the memory's source (document / paragraph / session). When
+        # set, per_cluster_cap limits how many sentences one source contributes,
+        # which raises precision without merging genuine multi-hop neighbors.
         ents = extract_entities(content)
         if extra_entities:
             ents |= {normalize_phrase(e) for e in extra_entities if e}
-        self.graph.add_node(node_id, node_type, ents)
+        self.graph.add_node(node_id, node_type, ents, cluster=cluster)
         self.store.put(node_id, content)
         self.lexical.add(node_id, content)
         if self.semantic is not None:
@@ -91,6 +95,56 @@ class NebulaMem:
                 seeds[doc_id] = e
         return seeds
 
+    def _cap_per_cluster(self, candidates, cap):
+        """Keep at most `cap` highest-energy nodes per cluster.
+
+        Cluster identity is the explicit source tag when present (document /
+        paragraph / session), else a concept-cluster formed by union-find over
+        shared entity anchors. The explicit tag is preferred because it does not
+        merge two genuinely-distinct memories that happen to share a bridge
+        entity — preserving multi-hop while capping same-source flooding.
+        """
+        if all(self.graph.node_meta(nid).get("cluster") is not None
+               for nid, _ in candidates) and candidates:
+            kept, counts = [], {}
+            for nid, energy in candidates:  # energy-sorted desc
+                key = self.graph.node_meta(nid)["cluster"]
+                if counts.get(key, 0) < cap:
+                    counts[key] = counts.get(key, 0) + 1
+                    kept.append((nid, energy))
+            return kept
+
+        parent = {}
+
+        def find(x):
+            parent.setdefault(x, x)
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        ids = [nid for nid, _ in candidates]
+        ent_rep = {}
+        for nid in ids:
+            find(nid)
+            for e in self.graph.node_entities.get(nid, ()):
+                if e in ent_rep:
+                    union(nid, ent_rep[e])
+                else:
+                    ent_rep[e] = nid
+        kept, counts = [], {}
+        for nid, energy in candidates:  # already energy-sorted desc
+            root = find(nid)
+            if counts.get(root, 0) < cap:
+                counts[root] = counts.get(root, 0) + 1
+                kept.append((nid, energy))
+        return kept
+
     def retrieve(self, query: str,
                  config: Optional[SpreadingActivationConfig] = None) -> List[ActivatedNode]:
         cfg = config or SpreadingActivationConfig()
@@ -121,6 +175,18 @@ class NebulaMem:
         # for the survivors (true on-demand loading: cost ~ max_results, not corpus).
         candidates = [(nid, e) for nid, e in activations.items() if e >= cfg.fire_threshold]
         candidates.sort(key=lambda kv: kv[1], reverse=True)
+
+        # energy-gap cutoff: discard the long low-energy tail (precision lever)
+        if cfg.energy_gap_ratio is not None and candidates:
+            floor = candidates[0][1] * cfg.energy_gap_ratio
+            candidates = [(n, e) for n, e in candidates if e >= floor]
+
+        # per-cluster cap: limit how many nodes survive from one concept-cluster,
+        # so a single fired paragraph cannot flood the result with its siblings
+        # (precision lever) while the multi-hop bridge cluster is still kept.
+        if cfg.per_cluster_cap is not None:
+            candidates = self._cap_per_cluster(candidates, cfg.per_cluster_cap)
+
         candidates = candidates[:cfg.max_results]
         fired: List[ActivatedNode] = []
         for nid, energy in candidates:

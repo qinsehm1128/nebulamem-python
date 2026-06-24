@@ -51,7 +51,7 @@ def build_memory(row, use_semantic=False):
                 continue
             nid = f"{p_idx}:{s_idx}"
             mem.register_memory(nid, sent, MemoryNodeType.FACT,
-                                extra_entities=[title])
+                                extra_entities=[title], cluster=f"p{p_idx}")
             node_meta[nid] = (normalize_phrase(title), s_idx)
     return mem, node_meta
 
@@ -141,43 +141,70 @@ def run_scale(rows, n_pool, n_probe, cfg_budget):
                 if not sent or not sent.strip():
                     continue
                 nid = f"q{q_idx}:{p_idx}:{s_idx}"
-                mem.register_memory(nid, sent, MemoryNodeType.FACT, extra_entities=[title])
+                mem.register_memory(nid, sent, MemoryNodeType.FACT,
+                                    extra_entities=[title], cluster=f"q{q_idx}:p{p_idx}")
                 node_meta[nid] = (q_idx, normalize_phrase(title), s_idx)
                 total_nodes += 1
         if len(probe) < n_probe:
             probe.append((q_idx, row))
 
-    loads_frac, recalls = [], []
-    uncapped_tokens, capped_tokens = [], []
-    # truly unbounded recall to expose context blow-up, vs the budgeted guard
+    loads_frac, uncapped_tokens = [], []
+    # truly unbounded recall to expose context blow-up
     cfg_uncapped = SpreadingActivationConfig(**{**cfg_budget.__dict__,
                                                 "token_budget": None,
                                                 "max_results": 100000})
+    # sweep several budgets to answer "is a small budget enough?": each lets the
+    # graph fire freely (max_results high) and only the token budget binds.
+    budgets = [400, 1500, 4000, 8000]
+    budget_stats = {b: {"recall": [], "tokens": []} for b in budgets}
+
     for q_idx, row in probe:
         gold = {(q_idx, t, s) for (t, s) in gold_set(row)}
-        # NORMAL operation (max_results cap + token budget): measures the real
-        # on-demand load fraction and recall a deployment would see.
         mem.store.reset_counter()
-        fired_b = mem.retrieve(row["question"], cfg_budget)
-        loads_frac.append(mem.store.loads / total_nodes)
-        pred = {node_meta[n.id] for n in fired_b if n.id in node_meta}
-        recalls.append(len(pred & gold) / len(gold) if gold else 0.0)
-        capped_tokens.append(estimate_tokens(mem.compile_to_markdown(fired_b)))
-        # UNCAPPED (no max_results, no budget): demonstrates context blow-up.
         fired_u = mem.retrieve(row["question"], cfg_uncapped)
         uncapped_tokens.append(estimate_tokens(mem.compile_to_markdown(fired_u)))
+        loads_frac.append(mem.store.loads / total_nodes)  # load cost of normal-ish op
+        for b in budgets:
+            cfg_b = SpreadingActivationConfig(**{**cfg_budget.__dict__,
+                                                 "token_budget": b, "max_results": 60})
+            fired_b = mem.retrieve(row["question"], cfg_b)
+            pred = {node_meta[n.id] for n in fired_b if n.id in node_meta}
+            budget_stats[b]["recall"].append(len(pred & gold) / len(gold) if gold else 0.0)
+            budget_stats[b]["tokens"].append(estimate_tokens(mem.compile_to_markdown(fired_b)))
     return {
         "pool_questions": n_pool,
         "total_nodes": total_nodes,
         "probe_count": len(probe),
         "avg_ondemand_load_fraction": mean(loads_frac),
-        "avg_recall_at_scale": mean(recalls),
         "avg_compiled_tokens_uncapped": mean(uncapped_tokens),
         "max_compiled_tokens_uncapped": max(uncapped_tokens) if uncapped_tokens else 0,
-        "avg_compiled_tokens_capped": mean(capped_tokens),
-        "max_compiled_tokens_capped": max(capped_tokens) if capped_tokens else 0,
-        "token_budget": cfg_budget.token_budget,
+        "token_budget_sweep": [
+            {"token_budget": b,
+             "avg_recall": mean(budget_stats[b]["recall"]),
+             "avg_tokens": mean(budget_stats[b]["tokens"]),
+             "max_tokens": max(budget_stats[b]["tokens"]) if budget_stats[b]["tokens"] else 0}
+            for b in budgets
+        ],
     }
+
+
+def run_precision_configs(rows, named_cfgs):
+    """Compare precision levers (per-cluster cap, energy-gap) head to head."""
+    out = []
+    for name, cfg in named_cfgs:
+        P, R, F1, full = [], [], [], []
+        for row in rows:
+            gold = gold_set(row)
+            if not gold:
+                continue
+            _, n_pred = evaluate_row(row, cfg)
+            p, r, f = prf(n_pred, gold)
+            P.append(p); R.append(r); F1.append(f)
+            _, _, fl = paragraph_recall(n_pred, gold)
+            full.append(fl)
+        out.append({"config": name, "P": mean(P), "R": mean(R), "F1": mean(F1),
+                    "both_paragraphs_recovered": mean(full)})
+    return out
 
 
 def run_maxresults_sweep(rows, base_cfg, caps):
@@ -226,6 +253,17 @@ def main():
 
     sweep = run_maxresults_sweep(rows[:min(args.sample, 500)], cfg,
                                  [2, 3, 5, 8, 12, 20])
+
+    def variant(**kw):
+        return SpreadingActivationConfig(**{**cfg.__dict__, **kw})
+    precision = run_precision_configs(rows[:args.sample], [
+        ("baseline (max=10)", cfg),
+        ("recall-tuned: cap=1,max=6", variant(per_cluster_cap=1, max_results=6)),
+        ("balanced: cap=1,max=4", variant(per_cluster_cap=1, max_results=4)),
+        ("balanced: cap=2,max=3", variant(per_cluster_cap=2, max_results=3)),
+        ("precision-tuned: cap=2,max=2", variant(per_cluster_cap=2, max_results=2)),
+    ])
+
     scale = run_scale(rows, args.pool, args.probe, cfg_budget)
 
     result = {
@@ -248,6 +286,7 @@ def main():
             for qt, d in by_type.items()
         },
         "max_results_sweep": sweep,
+        "precision_configs": precision,
         "scale": scale,
         "timing_sec": {"quality_eval": round(q_time, 1)},
     }

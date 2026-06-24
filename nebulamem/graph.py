@@ -23,9 +23,11 @@ class GraphStore:
         self.node_entities: Dict[str, Set[str]] = {}
 
     # ---- nodes ---------------------------------------------------------------
-    def add_node(self, node_id: str, node_type: MemoryNodeType, entities: Set[str]) -> None:
+    def add_node(self, node_id: str, node_type: MemoryNodeType, entities: Set[str],
+                 cluster: Optional[str] = None) -> None:
         now = time.time()
-        self.meta[node_id] = {"type": node_type, "created_at": now, "last_activated": now}
+        self.meta[node_id] = {"type": node_type, "created_at": now,
+                              "last_activated": now, "cluster": cluster}
         self.node_entities[node_id] = set(entities)
         for e in entities:
             self.entity_index[e].add(node_id)
