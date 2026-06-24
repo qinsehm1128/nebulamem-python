@@ -69,6 +69,24 @@ class NebulaMem:
     def update_state_with_suppression(self, old_node_id: str, new_node_id: str) -> None:
         self.graph.apply_temporal_override(old_node_id, new_node_id)
 
+    # ---- on-disk persistence (LMDB, demand-paged) ---------------------------
+    def save(self, path: str) -> dict:
+        """Persist this in-memory store to an on-disk LMDB env. Returns entry
+        counts per sub-database."""
+        from .disk import persist_to_lmdb
+        return persist_to_lmdb(self, path)
+
+    @classmethod
+    def open_disk(cls, path: str) -> "NebulaMem":
+        """Open an LMDB-backed, read-only NebulaMem. Queries demand-page from the
+        mmap; the full index is never resident in RAM."""
+        from .disk import open_disk_backend
+        self = cls.__new__(cls)
+        self.semantic = None
+        self._registered = 0
+        self._env, self.store, self.lexical, self.graph = open_disk_backend(path)
+        return self
+
     # ---- retrieval -----------------------------------------------------------
     def _seeds(self, query: str, cfg: SpreadingActivationConfig) -> Dict[str, float]:
         ranked = self.lexical.search(query, limit=max(cfg.seed_limit * 3, cfg.seed_limit))

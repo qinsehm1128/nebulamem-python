@@ -1,0 +1,48 @@
+{
+  "corpus": "sub2api",
+  "build": {
+    "files": 2335,
+    "chunks": 50133,
+    "queries": 10504,
+    "lmdb_entries": {
+      "stats": 2,
+      "post": 61327,
+      "content": 50133,
+      "meta": 50133,
+      "edges": 49898
+    },
+    "persist_sec": 14.83,
+    "build_sec": 48.25
+  },
+  "recall": {
+    "queries_tested": 2000,
+    "nebula_region_recall_at_k": {
+      "@1": 0.697,
+      "@3": 0.808,
+      "@5": 0.852,
+      "@10": 0.9005,
+      "@20": 0.9325,
+      "@30": 0.9355
+    },
+    "nebula_file_recall_at_k": {
+      "@1": 0.7055,
+      "@3": 0.815,
+      "@5": 0.856,
+      "@10": 0.904,
+      "@20": 0.9345,
+      "@30": 0.9375
+    },
+    "bm25_only_file_recall_at_k": {
+      "@1": 0.7055,
+      "@3": 0.815,
+      "@5": 0.856,
+      "@10": 0.904,
+      "@20": 0.9485,
+      "@30": 0.979
+    },
+    "mrr": 0.7654,
+    "avg_ondemand_load_fraction": 0.000596,
+    "avg_postings_scanned_docs": 12624.0,
+    "corpus_chunks": 50133
+  }
+}
