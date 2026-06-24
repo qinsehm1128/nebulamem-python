@@ -1,146 +1,166 @@
+"""NebulaMem core orchestrator (model-free).
+
+Pipeline, all classical/self-developed algorithms, no embedding model, no LLM:
+
+  1. lexical BM25 (+ optional self-developed Random-Indexing rescoring) locates
+     1..k seed star-points;
+  2. spreading activation diffuses energy across the associative graph, with
+     lateral inhibition suppressing superseded facts;
+  3. fired nodes are compiled into a token-budgeted Markdown constellation so a
+     large recall can never blow up the LLM context window.
+"""
 import logging
-from typing import List, Dict, Any, Optional
-from .types import (
-    MemoryNode, MemoryEdge, MemoryNodeType, MemoryEdgeType, 
-    ActivatedNode, SpreadingActivationConfig
-)
-from .vector import ZvecVectorStore
-from .graph import LadybugGraphStore
-from .kv import LmdbKVStore
+import time
+from typing import Dict, List, Optional
+
+from .graph import GraphStore
+from .lexical import BM25Index
+from .semantic import RandomIndex
+from .store import NodeStore
+from .text import extract_entities, normalize_phrase
+from .types import (ActivatedNode, MemoryEdgeType, MemoryNodeType,
+                    SpreadingActivationConfig)
 
 logger = logging.getLogger("nebulamem.core")
 
+
+def estimate_tokens(text: str) -> int:
+    """Cheap upper-ish estimate of LLM tokens (no tokenizer dependency)."""
+    words = len(text.split())
+    return max(words, len(text) // 4)
+
+
 class NebulaMem:
-    """
-    NebulaMem Core Orchestrator.
-    Fuses Alibaba Zvec (vector similarity), LadybugDB (property graph relations & lateral inhibition),
-    and LMDB (fast session state key-value registry) into a seamless, local-first long-term memory engine.
-    """
-    def __init__(self, db_dir: str = "./nebulamem_store", dimension: int = 64):
-        self.db_dir = db_dir
-        self.dimension = dimension
-        
-        # Initialize stores
-        self.vector_store = ZvecVectorStore(db_path=f"{db_dir}/zvec", dimension=dimension)
-        self.graph_store = LadybugGraphStore(db_path=f"{db_dir}/ladybug.lbug")
-        self.kv_store = LmdbKVStore(db_path=f"{db_dir}/lmdb")
-        
-        logger.info("NebulaMem initialized successfully.")
+    def __init__(self, db_dir: Optional[str] = None, use_semantic: bool = False,
+                 semantic_dim: int = 256):
+        # db_dir=None => fully in-memory (fast). A path => sqlite content store.
+        content_db = f"{db_dir}/content.sqlite" if db_dir else None
+        self.graph = GraphStore()
+        self.lexical = BM25Index()
+        self.store = NodeStore(content_db)
+        self.semantic = RandomIndex(dim=semantic_dim) if use_semantic else None
+        self._registered = 0
 
-    def register_memory(self, node_id: str, content: str, embedding: List[float], node_type: MemoryNodeType = MemoryNodeType.FACT) -> None:
-        """
-        Saves an atomic memory fact.
-        1. Embeds and indexes metadata in Alibaba Zvec.
-        2. Structurizes facts in LadybugDB graph Node.
-        """
-        self.vector_store.insert(node_id, embedding, content, node_type.value)
-        self.graph_store.add_node(node_id, content, node_type)
-        logger.debug(f"Memory registered: [{node_id}] of type '{node_type.value}'")
+    # ---- ingestion -----------------------------------------------------------
+    def register_memory(self, node_id: str, content: str,
+                        node_type: MemoryNodeType = MemoryNodeType.FACT,
+                        extra_entities: Optional[List[str]] = None,
+                        auto_link: bool = True) -> None:
+        ents = extract_entities(content)
+        if extra_entities:
+            ents |= {normalize_phrase(e) for e in extra_entities if e}
+        self.graph.add_node(node_id, node_type, ents)
+        self.store.put(node_id, content)
+        self.lexical.add(node_id, content)
+        if self.semantic is not None:
+            self.semantic.add(content)
+        if auto_link:
+            self.graph.auto_associate(node_id)
+        self._registered += 1
 
-    def associate(self, source_id: str, target_id: str, weight: float = 1.0, edge_type: MemoryEdgeType = MemoryEdgeType.ASSOCIATION) -> None:
-        """
-        Links two memory concepts with a synapses edge in LadybugDB.
-        """
-        self.graph_store.add_edge(source_id, target_id, weight, edge_type)
-        # Bidirectional linking for basic association to map cognitive paths
-        if edge_type == MemoryEdgeType.ASSOCIATION:
-            self.graph_store.add_edge(target_id, source_id, weight * 0.8, edge_type)
-        logger.debug(f"Connected [{source_id}] --[{edge_type.value}(w={weight})]--> [{target_id}]")
+    def associate(self, source_id: str, target_id: str, weight: float = 0.8) -> None:
+        self.graph.add_edge(source_id, target_id, weight, MemoryEdgeType.ASSOCIATION)
+        self.graph.add_edge(target_id, source_id, weight * 0.8, MemoryEdgeType.ASSOCIATION)
 
     def update_state_with_suppression(self, old_node_id: str, new_node_id: str) -> None:
-        """
-        Transition state where the new state actively suppresses the old outdated facts
-        using lateral inhibition.
-        """
-        self.graph_store.apply_temporal_override(old_node_id, new_node_id)
-        logger.info(f"State updated: Suppressing [{old_node_id}] in favor of [{new_node_id}]")
+        self.graph.apply_temporal_override(old_node_id, new_node_id)
 
-    def retrieve(self, query_embedding: List[float], config: Optional[SpreadingActivationConfig] = None) -> List[ActivatedNode]:
-        """
-        Orchestrates the complete hybrid cognitive retrieval:
-        1. Query Zvec vector index to find closest semantic seed nodes.
-        2. Propagate energy through LadybugDB graph paths.
-        3. Apply inhibitory dampeners on contradictory paths.
-        4. Return nodes exceeding activation threshold.
-        """
+    # ---- retrieval -----------------------------------------------------------
+    def _seeds(self, query: str, cfg: SpreadingActivationConfig) -> Dict[str, float]:
+        ranked = self.lexical.search(query, limit=max(cfg.seed_limit * 3, cfg.seed_limit))
+        if not ranked:
+            return {}
+        # blend self-developed semantic score if enabled
+        if self.semantic is not None and cfg.semantic_weight > 0:
+            qv = self.semantic.vector(query)
+            blended = []
+            max_bm = max(s for _, s in ranked) or 1.0
+            for doc_id, bm in ranked:
+                body = self.store.get(doc_id) or ""
+                cos = self.semantic.cosine(qv, self.semantic.vector(body))
+                score = (1 - cfg.semantic_weight) * (bm / max_bm) + cfg.semantic_weight * cos
+                blended.append((doc_id, score))
+            ranked = sorted(blended, key=lambda kv: kv[1], reverse=True)
+            norm = ranked[0][1] or 1.0
+        else:
+            norm = ranked[0][1] or 1.0
+        seeds: Dict[str, float] = {}
+        for doc_id, score in ranked[:cfg.seed_limit]:
+            e = score / norm
+            if e >= cfg.seed_min_score:
+                seeds[doc_id] = e
+        return seeds
+
+    def retrieve(self, query: str,
+                 config: Optional[SpreadingActivationConfig] = None) -> List[ActivatedNode]:
         cfg = config or SpreadingActivationConfig()
-        
-        # 1. Search Zvec for seeds
-        seeds = self.vector_store.search(query_embedding, limit=3)
-        activations: Dict[str, float] = {}
-        for seed in seeds:
-            if seed["similarity"] > 0.25: # minimum similarity to trigger seed activation
-                activations[seed["id"]] = seed["similarity"]
+        activations = self._seeds(query, cfg)
+        hop_of: Dict[str, int] = {nid: 0 for nid in activations}
 
-        # 2. Run Spreading Activation algorithm
+        # spreading activation with lateral inhibition
         for step in range(cfg.steps):
-            next_activations = dict(activations)
-            for current_node, energy in activations.items():
-                edges = self.graph_store.get_edges_from(current_node)
-                for edge in edges:
-                    target = edge.target
-                    weight = edge.weight
-                    
+            delta: Dict[str, float] = {}
+            for node, energy in activations.items():
+                if energy <= 0:
+                    continue
+                for edge in self.graph.edges_from(node):
                     if edge.edge_type == MemoryEdgeType.INHIBITORY:
-                        # Active node dampens contradictory node energy (suppresses contradiction)
-                        suppression = energy * weight * 0.95
-                        next_activations[target] = next_activations.get(target, 0.0) - suppression
+                        delta[edge.target] = delta.get(edge.target, 0.0) - energy * edge.weight * cfg.inhibition
                     else:
-                        # Positive energy propagation
-                        spread = energy * weight * cfg.decay
-                        next_activations[target] = next_activations.get(target, 0.0) + spread
-            
-            # Apply biological ceiling bounding (-1.0 to 1.0)
-            for node_id in next_activations:
-                next_activations[node_id] = max(-1.0, min(1.0, next_activations[node_id]))
-                
-            activations = next_activations
+                        spread = energy * edge.weight * cfg.decay
+                        delta[edge.target] = delta.get(edge.target, 0.0) + spread
+                        if edge.target not in hop_of:
+                            hop_of[edge.target] = hop_of.get(node, 0) + 1
+            if not delta:
+                break
+            for nid, d in delta.items():
+                v = activations.get(nid, 0.0) + d
+                activations[nid] = max(-1.0, min(1.0, v))
 
-        # 3. Filter activated nodes exceeding fire threshold
-        fired_nodes: List[ActivatedNode] = []
-        for node_id, energy in activations.items():
-            if energy >= cfg.fire_threshold:
-                node = self.graph_store.get_node(node_id)
-                if node:
-                    fired_nodes.append(
-                        ActivatedNode(
-                            id=node.id,
-                            content=node.content,
-                            node_type=node.node_type,
-                            activation_energy=round(energy, 4),
-                            created_at=node.created_at,
-                            last_activated=node.last_activated
-                        )
-                    )
+        # fire threshold — rank on energy FIRST, then materialize content only
+        # for the survivors (true on-demand loading: cost ~ max_results, not corpus).
+        candidates = [(nid, e) for nid, e in activations.items() if e >= cfg.fire_threshold]
+        candidates.sort(key=lambda kv: kv[1], reverse=True)
+        candidates = candidates[:cfg.max_results]
+        fired: List[ActivatedNode] = []
+        for nid, energy in candidates:
+            meta = self.graph.node_meta(nid)
+            if not meta:
+                continue
+            content = self.store.get(nid) or ""  # on-demand load
+            fired.append(ActivatedNode(
+                id=nid, content=content, node_type=meta["type"],
+                activation_energy=round(energy, 4), hops=hop_of.get(nid, 99),
+                created_at=meta["created_at"], last_activated=meta["last_activated"],
+            ))
 
-        # Sort by final activation weight descending
-        fired_nodes.sort(key=lambda x: x.activation_energy, reverse=True)
-        return fired_nodes[:cfg.max_results]
+        # token-budget guard: never overflow the context window
+        if cfg.token_budget is not None:
+            kept, used = [], 0
+            for n in fired:
+                t = estimate_tokens(n.content)
+                if used + t > cfg.token_budget and kept:
+                    break
+                kept.append(n)
+                used += t
+            fired = kept
+        return fired
 
-    def compile_to_markdown(self, activated_nodes: List[ActivatedNode]) -> str:
-        """
-        Compiles the active thought constellation into a structured prompt block
-        aligned with the LLM Wiki specification.
-        """
-        if not activated_nodes:
-            return "## 🌌 Active Memory Space\nNo active long-term context retrieved."
-
-        md = "## 🌌 NebulaMem v2: Active Memory Constellation (Zvec + LadybugDB)\n"
-        md += "The following relevant contexts are currently high-lighted in your local cognitive star-field:\n\n"
-        
-        # Segment by node type
-        categories = {
-            "state": [n for n in activated_nodes if n.node_type == MemoryNodeType.STATE],
-            "fact": [n for n in activated_nodes if n.node_type == MemoryNodeType.FACT],
-            "entity": [n for n in activated_nodes if n.node_type == MemoryNodeType.ENTITY]
+    # ---- compilation ---------------------------------------------------------
+    def compile_to_markdown(self, nodes: List[ActivatedNode]) -> str:
+        if not nodes:
+            return "## Active Memory\n(no relevant long-term context)"
+        out = ["## NebulaMem — Active Constellation"]
+        buckets = {
+            MemoryNodeType.STATE: "STATE",
+            MemoryNodeType.FACT: "FACT",
+            MemoryNodeType.ENTITY: "ENTITY",
         }
-
-        for cat, items in categories.items():
-            if items:
-                md += f"### ✦ {cat.upper()} MEMORIES\n"
-                for item in items:
-                    md += f"- **[{item.id}]** (Activation: {item.activation_energy})\n"
-                    md += f"  - *Context*: {item.content}\n"
-                md += "\n"
-                
-        return md
+        for ntype, label in buckets.items():
+            items = [n for n in nodes if n.node_type == ntype]
+            if not items:
+                continue
+            out.append(f"\n### {label}")
+            for n in items:
+                out.append(f"- ({n.activation_energy:+.2f}, hop {n.hops}) {n.content}")
+        return "\n".join(out)

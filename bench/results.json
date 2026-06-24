@@ -1,0 +1,103 @@
+{
+  "n_questions": 1000,
+  "config": {
+    "seed_limit": 3,
+    "seed_min_score": 0.0,
+    "steps": 3,
+    "decay": 0.7,
+    "inhibition": 0.95,
+    "fire_threshold": 0.18,
+    "max_results": 10,
+    "token_budget": null,
+    "semantic_weight": 0.0
+  },
+  "quality": {
+    "bm25_only": {
+      "P": 0.4091666666666666,
+      "R": 0.5228428571428572,
+      "F1": 0.452552380952381,
+      "both_paragraphs_recovered": 0.417
+    },
+    "nebulamem": {
+      "P": 0.18250992063492064,
+      "R": 0.7486380952380952,
+      "F1": 0.2898376878023937,
+      "both_paragraphs_recovered": 0.71
+    }
+  },
+  "by_type": {
+    "comparison": {
+      "bm25_bothParas": 0.32642487046632124,
+      "nebula_bothParas": 0.5647668393782384,
+      "bm25_F1": 0.4363187762151493,
+      "nebula_F1": 0.2703130761344721,
+      "n": 193
+    },
+    "bridge": {
+      "bm25_bothParas": 0.43866171003717475,
+      "nebula_bothParas": 0.7447335811648079,
+      "bm25_F1": 0.45643476721543635,
+      "nebula_F1": 0.29450714263747285,
+      "n": 807
+    }
+  },
+  "max_results_sweep": [
+    {
+      "max_results": 2,
+      "P": 0.522,
+      "R": 0.4508333333333333,
+      "F1": 0.4775238095238095,
+      "both_paragraphs_recovered": 0.294
+    },
+    {
+      "max_results": 3,
+      "P": 0.414,
+      "R": 0.5344,
+      "F1": 0.4600857142857143,
+      "both_paragraphs_recovered": 0.43
+    },
+    {
+      "max_results": 5,
+      "P": 0.2982,
+      "R": 0.6310666666666667,
+      "F1": 0.3994714285714286,
+      "both_paragraphs_recovered": 0.592
+    },
+    {
+      "max_results": 8,
+      "P": 0.21225714285714287,
+      "R": 0.7076,
+      "F1": 0.3225518481518482,
+      "both_paragraphs_recovered": 0.674
+    },
+    {
+      "max_results": 12,
+      "P": 0.16113189033189032,
+      "R": 0.7938666666666666,
+      "F1": 0.2647279514603044,
+      "both_paragraphs_recovered": 0.768
+    },
+    {
+      "max_results": 20,
+      "P": 0.1132276273176428,
+      "R": 0.8918,
+      "F1": 0.19816344031030664,
+      "both_paragraphs_recovered": 0.898
+    }
+  ],
+  "scale": {
+    "pool_questions": 800,
+    "total_nodes": 33000,
+    "probe_count": 200,
+    "avg_ondemand_load_fraction": 0.00030303030303030303,
+    "avg_recall_at_scale": 0.5175,
+    "avg_compiled_tokens_uncapped": 1085203.205,
+    "max_compiled_tokens_uncapped": 1197004,
+    "avg_compiled_tokens_capped": 399.45,
+    "max_compiled_tokens_capped": 458,
+    "token_budget": 400
+  },
+  "timing_sec": {
+    "quality_eval": 3.3
+  }
+}

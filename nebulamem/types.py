@@ -1,33 +1,46 @@
+"""Core data structures for NebulaMem (model-free edition).
+
+No embedding model, no LLM. Every type here is plain data describing the
+star-field: atomic nodes, weighted synaptic edges, and the configuration of
+the spreading-activation retrieval pass.
+"""
 import enum
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Optional, Set
+
 
 class MemoryNodeType(str, enum.Enum):
     FACT = "fact"
     ENTITY = "entity"
     STATE = "state"
 
+
 class MemoryEdgeType(str, enum.Enum):
     ASSOCIATION = "association"
     TEMPORAL_SEQUENCE = "temporal_sequence"
     INHIBITORY = "inhibitory"
 
+
 @dataclass
 class MemoryNode:
     id: str
     content: str
-    embedding: List[float] = field(default_factory=list)
     node_type: MemoryNodeType = MemoryNodeType.FACT
+    # Surface entities mined from `content` (proper nouns / titles). These drive
+    # automatic associative wiring and the multi-hop bridge edges. No model used.
+    entities: Set[str] = field(default_factory=set)
     created_at: float = 0.0
     last_activated: float = 0.0
+
 
 @dataclass
 class MemoryEdge:
     source: str
     target: str
-    weight: float  # Synaptic strength: 0.0 to 1.0
+    weight: float  # synaptic strength 0..1 (or up to 1 for inhibitory magnitude)
     edge_type: MemoryEdgeType = MemoryEdgeType.ASSOCIATION
     updated_at: float = 0.0
+
 
 @dataclass
 class ActivatedNode:
@@ -35,12 +48,26 @@ class ActivatedNode:
     content: str
     node_type: MemoryNodeType
     activation_energy: float
-    created_at: float
-    last_activated: float
+    hops: int  # graph distance from the nearest lexical seed (0 = seed itself)
+    created_at: float = 0.0
+    last_activated: float = 0.0
+
 
 @dataclass
 class SpreadingActivationConfig:
-    steps: int = 3
-    decay: float = 0.6
-    fire_threshold: float = 0.15
-    max_results: int = 10
+    # seed selection
+    seed_limit: int = 8           # max lexical/semantic seeds
+    seed_min_score: float = 0.0   # min normalized seed score to ignite
+
+    # spreading
+    steps: int = 3                # N iterations of energy diffusion
+    decay: float = 0.6            # lambda: per-hop diffusion damping
+    inhibition: float = 0.95      # beta: lateral-inhibition strength
+    fire_threshold: float = 0.15  # tau: energy needed to be "fired"
+
+    # output control
+    max_results: int = 10         # hard cap on returned nodes
+    token_budget: Optional[int] = None  # cap compiled-context size (approx tokens)
+
+    # fusion of lexical vs self-developed semantic (random-indexing) seed scores
+    semantic_weight: float = 0.0  # 0 = pure lexical; >0 blends RI cosine

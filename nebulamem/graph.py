@@ -1,161 +1,103 @@
-import logging
+"""In-process associative graph: synapses, plasticity, decay, inhibition.
+
+Pure Python — no Cypher engine, no external graph DB. Holds only lightweight
+node metadata (id, type, entities, timestamps) and weighted edges. Node *content*
+lives in the NodeStore and is fetched on demand, so the hot graph stays small
+even when the corpus is large.
+"""
 import time
-from typing import List, Dict, Any, Optional
-import ladybug
-from .types import MemoryNode, MemoryEdge, MemoryNodeType, MemoryEdgeType
+from collections import defaultdict
+from typing import Dict, List, Optional, Set
 
-logger = logging.getLogger("nebulamem.graph")
+from .types import MemoryEdge, MemoryEdgeType, MemoryNodeType
 
-class LadybugGraphStore:
-    """
-    A pure, production-grade wrapper around LadybugDB (embedded columnar graph database, successor to KuzuDB).
-    This module contains NO fallback/mock code and communicates directly with '@ladybugdb/core' native columnar libraries.
-    """
-    def __init__(self, db_path: str = "./ladybug_data.lbug"):
-        self.db_path = db_path
-        
-        db = ladybug.Database(self.db_path)
-        self.ladybug_conn = ladybug.Connection(db)
-        self._bootstrap_schema()
-        logger.info(f"Native LadybugDB Graph database opened at '{self.db_path}'")
 
-    def _bootstrap_schema(self) -> None:
-        """
-        Bootstraps LadybugDB schema for Nodes and Relationships.
-        """
-        try:
-            # Columnar schemas for optimal graph scans
-            self.ladybug_conn.execute(
-                "CREATE NODE TABLE MemoryNode(id STRING, content STRING, node_type STRING, created_at DOUBLE, last_activated DOUBLE, PRIMARY KEY(id))"
-            )
-            self.ladybug_conn.execute(
-                "CREATE REL TABLE LINK(FROM MemoryNode TO MemoryNode, weight DOUBLE, edge_type STRING, updated_at DOUBLE)"
-            )
-            logger.info("LadybugDB native schemas bootstrapped successfully.")
-        except Exception as e:
-            # Table already exists
-            logger.debug(f"Schema already bootstrapped: {e}")
+class GraphStore:
+    REINFORCE_STEP = 0.1     # synaptic potentiation per co-activation
+    MIN_WEIGHT = 0.1         # prune/decay floor
 
-    def execute_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        """
-        Executes a Cypher query on LadybugDB and returns rows as dictionaries.
-        """
-        result = self.ladybug_conn.execute(query, params or {})
-        return result.get_all_result() # Returns list of dicts
+    def __init__(self):
+        self.meta: Dict[str, dict] = {}                       # id -> {type, created_at, last_activated}
+        self.out: Dict[str, Dict[str, MemoryEdge]] = defaultdict(dict)  # src -> {dst: edge}
+        self.entity_index: Dict[str, Set[str]] = defaultdict(set)       # entity -> {node_ids}
+        self.node_entities: Dict[str, Set[str]] = {}
 
-    def add_node(self, node_id: str, content: str, node_type: MemoryNodeType) -> None:
-        """
-        Registers a Memory Node in LadybugDB.
-        """
+    # ---- nodes ---------------------------------------------------------------
+    def add_node(self, node_id: str, node_type: MemoryNodeType, entities: Set[str]) -> None:
         now = time.time()
-        self.ladybug_conn.execute(
-            "CREATE (n:MemoryNode {id: $id, content: $content, node_type: $node_type, created_at: $now, last_activated: $now})",
-            {"id": node_id, "content": content, "node_type": node_type.value, "now": now}
-        )
+        self.meta[node_id] = {"type": node_type, "created_at": now, "last_activated": now}
+        self.node_entities[node_id] = set(entities)
+        for e in entities:
+            self.entity_index[e].add(node_id)
 
-    def add_edge(self, source_id: str, target_id: str, weight: float, edge_type: MemoryEdgeType) -> None:
-        """
-        Registers a Relationship Edge in LadybugDB.
-        Biologically reinforces association weights if reinforced.
-        """
+    def has_node(self, node_id: str) -> bool:
+        return node_id in self.meta
+
+    def node_meta(self, node_id: str) -> Optional[dict]:
+        return self.meta.get(node_id)
+
+    def all_node_ids(self) -> List[str]:
+        return list(self.meta.keys())
+
+    # ---- edges ---------------------------------------------------------------
+    def add_edge(self, source: str, target: str, weight: float,
+                 edge_type: MemoryEdgeType = MemoryEdgeType.ASSOCIATION) -> None:
+        if source == target:
+            return
         now = time.time()
-        exists = self.ladybug_conn.execute(
-            "MATCH (a:MemoryNode {id: $source})-[r:LINK]->(b:MemoryNode {id: $target}) RETURN r.weight AS w",
-            {"source": source_id, "target": target_id}
-        ).get_all_result()
-        
-        if exists and edge_type != MemoryEdgeType.INHIBITORY:
-            new_weight = min(1.0, exists[0]["w"] + 0.1) # Synaptic reinforcement
-            self.ladybug_conn.execute(
-                "MATCH (a:MemoryNode {id: $source})-[r:LINK]->(b:MemoryNode {id: $target}) SET r.weight = $new_weight, r.updated_at = $now",
-                {"source": source_id, "target": target_id, "new_weight": new_weight, "now": now}
-            )
+        existing = self.out[source].get(target)
+        if existing and existing.edge_type == edge_type and edge_type != MemoryEdgeType.INHIBITORY:
+            existing.weight = min(1.0, existing.weight + self.REINFORCE_STEP)  # plasticity
+            existing.updated_at = now
         else:
-            self.ladybug_conn.execute(
-                "MATCH (a:MemoryNode {id: $source}), (b:MemoryNode {id: $target}) "
-                "CREATE (a)-[r:LINK {weight: $weight, edge_type: $edge_type, updated_at: $now}]->(b)",
-                {"source": source_id, "target": target_id, "weight": weight, "edge_type": edge_type.value, "now": now}
-            )
+            self.out[source][target] = MemoryEdge(source, target, weight, edge_type, now)
 
-    def apply_temporal_override(self, old_node_id: str, new_node_id: str) -> None:
-        """
-        Applies a temporal progress pointer from old to new, and 
-        establishes a strong Inhibitory Connection back from new to old to suppress the old state.
-        """
-        # Progression pointer: Old leads to New
-        self.add_edge(old_node_id, new_node_id, weight=0.8, edge_type=MemoryEdgeType.TEMPORAL_SEQUENCE)
-        # Inhibitory dampener: New actively suppresses Old (lateral inhibition)
-        self.add_edge(new_node_id, old_node_id, weight=1.0, edge_type=MemoryEdgeType.INHIBITORY)
+    def auto_associate(self, node_id: str, max_links: int = 32,
+                       max_anchor_df: int = 200) -> int:
+        """Wire a new node to existing nodes sharing entity anchors.
 
-    def get_edges_from(self, source_id: str) -> List[MemoryEdge]:
-        """
-        Retrieves all outgoing relationships from a source node.
-        """
-        rows = self.ladybug_conn.execute(
-            "MATCH (a:MemoryNode {id: $source})-[r:LINK]->(b:MemoryNode) "
-            "RETURN b.id AS target, r.weight AS weight, r.edge_type AS edge_type, r.updated_at AS updated_at",
-            {"source": source_id}
-        ).get_all_result()
-        
-        return [
-            MemoryEdge(
-                source=source_id,
-                target=row["target"],
-                weight=row["weight"],
-                edge_type=MemoryEdgeType(row["edge_type"]),
-                updated_at=row["updated_at"]
-            ) for row in rows
-        ]
+        Weight scales with the number of shared anchors. This is the self-
+        organizing substrate that produces multi-hop bridges with no model:
+        two memories that mention the same proper noun become neighbors.
 
-    def get_node(self, node_id: str) -> Optional[MemoryNode]:
+        Anchors that already link to more than `max_anchor_df` nodes are skipped
+        as non-discriminative hubs (document-frequency pruning) — this keeps
+        ingestion near-linear and stops generic terms from creating giant,
+        meaningless stars at scale.
         """
-        Retrieves complete node metadata by ID.
-        """
-        rows = self.ladybug_conn.execute(
-            "MATCH (n:MemoryNode {id: $id}) "
-            "RETURN n.content AS content, n.node_type AS node_type, n.created_at AS created_at, n.last_activated AS last_activated",
-            {"id": node_id}
-        ).get_all_result()
-        
-        if not rows:
-            return None
-        row = rows[0]
-        return MemoryNode(
-            id=node_id,
-            content=row["content"],
-            node_type=MemoryNodeType(row["node_type"]),
-            created_at=row["created_at"],
-            last_activated=row["last_activated"]
-        )
+        my_ents = self.node_entities.get(node_id, set())
+        if not my_ents:
+            return 0
+        shared: Dict[str, int] = defaultdict(int)
+        for e in my_ents:
+            bucket = self.entity_index.get(e, ())
+            if len(bucket) > max_anchor_df:
+                continue
+            for other in bucket:
+                if other != node_id:
+                    shared[other] += 1
+        links = 0
+        for other, overlap in sorted(shared.items(), key=lambda kv: kv[1], reverse=True)[:max_links]:
+            w = min(1.0, 0.45 + 0.18 * overlap)
+            self.add_edge(node_id, other, w, MemoryEdgeType.ASSOCIATION)
+            self.add_edge(other, node_id, w, MemoryEdgeType.ASSOCIATION)
+            links += 1
+        return links
 
+    def apply_temporal_override(self, old_id: str, new_id: str) -> None:
+        """new supersedes old: progression edge + back inhibitory edge."""
+        self.add_edge(old_id, new_id, 0.8, MemoryEdgeType.TEMPORAL_SEQUENCE)
+        self.add_edge(new_id, old_id, 1.0, MemoryEdgeType.INHIBITORY)
 
-    def getAllNodes(self) -> List[MemoryNode]:
-        """
-        Retrieves all memory nodes from LadybugDB.
-        """
-        rows = self.ladybug_conn.execute(
-            "MATCH (n:MemoryNode) RETURN n.id AS id, n.content AS content, n.node_type AS type, n.created_at AS createdAt, n.last_activated AS lastActivated"
-        ).get_all_result()
-        
-        return [
-            MemoryNode(
-                id=row["id"],
-                content=row["content"],
-                embedding=[],
-                node_type=MemoryNodeType(row["type"]),
-                created_at=row["createdAt"],
-                last_activated=row["lastActivated"]
-            ) for row in rows
-        ]
+    def edges_from(self, source: str) -> List[MemoryEdge]:
+        return list(self.out.get(source, {}).values())
 
-    def decay_weights(self, idle_time_seconds: float, decay_rate: float = 0.005) -> None:
-        """
-        Simulates biological forgetting by decaying edge weights over time, 
-        leaving inhibitory links intact.
-        """
-        self.ladybug_conn.execute(
-            "MATCH (a)-[r:LINK]->(b) "
-            "WHERE r.edge_type <> 'inhibitory' "
-            "SET r.weight = apoc.math.max(0.1, r.weight - ($idle * $decay))",
-            {"idle": idle_time_seconds, "decay": decay_rate}
-        )
+    def decay_weights(self, idle_seconds: float, decay_rate: float = 0.005) -> int:
+        """Biological forgetting: non-inhibitory edges decay toward the floor."""
+        pruned = 0
+        for src, dsts in list(self.out.items()):
+            for dst, edge in list(dsts.items()):
+                if edge.edge_type == MemoryEdgeType.INHIBITORY:
+                    continue
+                edge.weight = max(self.MIN_WEIGHT, edge.weight - idle_seconds * decay_rate)
+        return pruned

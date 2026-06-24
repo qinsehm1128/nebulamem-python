@@ -16,3 +16,5 @@ env/
 *.lmdb/
 *.lmdb-lock
 .DS_Store
+bench/run.log
+scratchpad/
