@@ -32,13 +32,15 @@ def estimate_tokens(text: str) -> int:
 
 class NebulaMem:
     def __init__(self, db_dir: Optional[str] = None, use_semantic: bool = False,
-                 semantic_dim: int = 256):
+                 semantic_dim: int = 256, embedder=None):
         # db_dir=None => fully in-memory (fast). A path => sqlite content store.
         content_db = f"{db_dir}/content.sqlite" if db_dir else None
         self.graph = GraphStore()
         self.lexical = BM25Index()
         self.store = NodeStore(content_db)
         self.semantic = RandomIndex(dim=semantic_dim) if use_semantic else None
+        self.embedder = embedder            # optional dense channel (List[str]->np.ndarray)
+        self.vectors: Dict[str, "np.ndarray"] = {}  # node_id -> int8 vector
         self._registered = 0
 
     # ---- ingestion -----------------------------------------------------------
@@ -58,6 +60,9 @@ class NebulaMem:
         self.lexical.add(node_id, content)
         if self.semantic is not None:
             self.semantic.add(content)
+        if self.embedder is not None:
+            from .embedding import quantize_int8
+            self.vectors[node_id] = quantize_int8(self.embedder([content])[0])
         if auto_link:
             self.graph.auto_associate(node_id)
         self._registered += 1
@@ -77,15 +82,26 @@ class NebulaMem:
         return persist_to_lmdb(self, path)
 
     @classmethod
-    def open_disk(cls, path: str) -> "NebulaMem":
+    def open_disk(cls, path: str, embedder=None) -> "NebulaMem":
         """Open an LMDB-backed, read-only NebulaMem. Queries demand-page from the
-        mmap; the full index is never resident in RAM."""
+        mmap; the full index is never resident in RAM. Pass `embedder` to enable
+        the dense hybrid channel (vectors are read on-demand from disk)."""
         from .disk import open_disk_backend
         self = cls.__new__(cls)
         self.semantic = None
+        self.embedder = embedder
+        self.vectors = {}
         self._registered = 0
-        self._env, self.store, self.lexical, self.graph = open_disk_backend(path)
+        (self._env, self.store, self.lexical, self.graph,
+         self._disk_vectors) = open_disk_backend(path)
         return self
+
+    def _vector(self, node_id):
+        v = self.vectors.get(node_id)
+        if v is not None:
+            return v
+        dv = getattr(self, "_disk_vectors", None)
+        return dv.get(node_id) if dv is not None else None
 
     # ---- retrieval -----------------------------------------------------------
     def _seeds(self, query: str, cfg: SpreadingActivationConfig) -> Dict[str, float]:
@@ -198,6 +214,24 @@ class NebulaMem:
         if cfg.energy_gap_ratio is not None and candidates:
             floor = candidates[0][1] * cfg.energy_gap_ratio
             candidates = [(n, e) for n, e in candidates if e >= floor]
+
+        # dense hybrid rerank: fuse the BM25/activation energy with the cosine of
+        # a learned embedding over the top `rerank_pool` candidates. This is the
+        # legitimate fix for lexical vocabulary-mismatch — no file filtering, no
+        # hand-built lexicon. Re-scoring only the pool keeps it on-demand.
+        if cfg.hybrid_weight > 0 and self.embedder is not None and candidates:
+            from .embedding import cosine_int8, quantize_int8
+            pool = candidates[:max(cfg.rerank_pool, cfg.max_results)]
+            emax = pool[0][1] or 1.0
+            qv = quantize_int8(self.embedder([query])[0])
+            rescored = []
+            for nid, energy in pool:
+                vec = self._vector(nid)
+                cos = max(0.0, cosine_int8(qv, vec)) if vec is not None else 0.0
+                score = (1 - cfg.hybrid_weight) * (energy / emax) + cfg.hybrid_weight * cos
+                rescored.append((nid, score))
+            rescored.sort(key=lambda kv: kv[1], reverse=True)
+            candidates = rescored
 
         # per-cluster cap: limit how many nodes survive from one concept-cluster,
         # so a single fired paragraph cannot flood the result with its siblings

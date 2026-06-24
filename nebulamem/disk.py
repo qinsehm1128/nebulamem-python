@@ -23,7 +23,7 @@ from .text import tokenize
 from .types import MemoryEdge, MemoryEdgeType, MemoryNode, MemoryNodeType
 
 # sub-databases inside one env
-_DBS = ("stats", "post", "content", "meta", "edges")
+_DBS = ("stats", "post", "content", "meta", "edges", "vec")
 _MAP_SIZE = 8 * 1024 * 1024 * 1024  # 8 GiB virtual cap (sparse; not preallocated)
 
 
@@ -51,6 +51,9 @@ def persist_to_lmdb(mem, path: str) -> dict:
             rows = [[e.target, e.weight, e.edge_type.value, e.updated_at]
                     for e in dsts.values()]
             txn.put(src.encode(), json.dumps(rows).encode(), db=handles["edges"])
+        # int8 dense vectors (4x smaller than float32) for the hybrid channel
+        for nid, vec in getattr(mem, "vectors", {}).items():
+            txn.put(nid.encode(), vec.astype("int8").tobytes(), db=handles["vec"])
     with env.begin() as txn:
         stat = {name: txn.stat(db=handles[name])["entries"] for name in _DBS}
     env.sync()
@@ -121,11 +124,33 @@ class _DiskGraphStore:
                 for dst, w, t, u in json.loads(v)]
 
 
+class _DiskVectorStore:
+    def __init__(self, env, db):
+        self.env, self.db = env, db
+
+    def get(self, node_id: str):
+        with self.env.begin(db=self.db) as txn:
+            v = txn.get(node_id.encode())
+        return np.frombuffer(v, dtype=np.int8) if v is not None else None
+
+
 def open_disk_backend(path: str):
-    """Return (node_store, bm25, graph) read-backed by the LMDB env at `path`."""
+    """Return (env, node_store, bm25, graph, vectors) read-backed by the LMDB env."""
     env = lmdb.open(path, readonly=True, max_dbs=len(_DBS), lock=False)
-    h = {name: env.open_db(name.encode()) for name in _DBS}
+    h = {}
+    for name in _DBS:
+        try:
+            h[name] = env.open_db(name.encode(), create=False)
+        except lmdb.Error:
+            h[name] = None  # older index without this sub-db (e.g. 'vec')
+    vec = _DiskVectorStore(env, h["vec"]) if h.get("vec") else _NullVectorStore()
     return (env,
             _DiskNodeStore(env, h["content"]),
             _DiskBM25Index(env, h["post"], h["stats"]),
-            _DiskGraphStore(env, h["meta"], h["edges"]))
+            _DiskGraphStore(env, h["meta"], h["edges"]),
+            vec)
+
+
+class _NullVectorStore:
+    def get(self, node_id):
+        return None

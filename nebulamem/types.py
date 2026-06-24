@@ -73,3 +73,7 @@ class SpreadingActivationConfig:
 
     # fusion of lexical vs self-developed semantic (random-indexing) seed scores
     semantic_weight: float = 0.0  # 0 = pure lexical; >0 blends RI cosine
+
+    # dense hybrid channel (requires an embedder on the NebulaMem instance)
+    hybrid_weight: float = 0.0    # 0 = no dense; 0.5 = equal BM25/dense fusion
+    rerank_pool: int = 50         # candidates re-scored by the dense channel
