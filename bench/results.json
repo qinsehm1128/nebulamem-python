@@ -9,6 +9,8 @@
     "fire_threshold": 0.18,
     "max_results": 10,
     "token_budget": null,
+    "per_cluster_cap": null,
+    "energy_gap_ratio": null,
     "semantic_weight": 0.0
   },
   "quality": {
@@ -19,25 +21,25 @@
       "both_paragraphs_recovered": 0.417
     },
     "nebulamem": {
-      "P": 0.18250992063492064,
-      "R": 0.7486380952380952,
-      "F1": 0.2898376878023937,
-      "both_paragraphs_recovered": 0.71
+      "P": 0.18160992063492065,
+      "R": 0.7458642857142858,
+      "F1": 0.2884809758868582,
+      "both_paragraphs_recovered": 0.707
     }
   },
   "by_type": {
     "comparison": {
       "bm25_bothParas": 0.32642487046632124,
-      "nebula_bothParas": 0.5647668393782384,
+      "nebula_bothParas": 0.5595854922279793,
       "bm25_F1": 0.4363187762151493,
-      "nebula_F1": 0.2703130761344721,
+      "nebula_F1": 0.26944951827609553,
       "n": 193
     },
     "bridge": {
       "bm25_bothParas": 0.43866171003717475,
-      "nebula_bothParas": 0.7447335811648079,
+      "nebula_bothParas": 0.7422552664188352,
       "bm25_F1": 0.45643476721543635,
-      "nebula_F1": 0.29450714263747285,
+      "nebula_F1": 0.2930324892931497,
       "n": 807
     }
   },
@@ -58,31 +60,68 @@
     },
     {
       "max_results": 5,
-      "P": 0.2982,
-      "R": 0.6310666666666667,
-      "F1": 0.3994714285714286,
-      "both_paragraphs_recovered": 0.592
+      "P": 0.29500000000000004,
+      "R": 0.6249,
+      "F1": 0.39535238095238096,
+      "both_paragraphs_recovered": 0.582
     },
     {
       "max_results": 8,
-      "P": 0.21225714285714287,
-      "R": 0.7076,
-      "F1": 0.3225518481518482,
-      "both_paragraphs_recovered": 0.674
+      "P": 0.21100714285714287,
+      "R": 0.7041,
+      "F1": 0.32075184815184815,
+      "both_paragraphs_recovered": 0.67
     },
     {
       "max_results": 12,
-      "P": 0.16113189033189032,
-      "R": 0.7938666666666666,
-      "F1": 0.2647279514603044,
-      "both_paragraphs_recovered": 0.768
+      "P": 0.15996522366522367,
+      "R": 0.7887,
+      "F1": 0.26285414193649487,
+      "both_paragraphs_recovered": 0.766
     },
     {
       "max_results": 20,
       "P": 0.1132276273176428,
-      "R": 0.8918,
-      "F1": 0.19816344031030664,
-      "both_paragraphs_recovered": 0.898
+      "R": 0.8921333333333333,
+      "F1": 0.19817134544864656,
+      "both_paragraphs_recovered": 0.9
+    }
+  ],
+  "precision_configs": [
+    {
+      "config": "baseline (max=10)",
+      "P": 0.18160992063492065,
+      "R": 0.7458642857142858,
+      "F1": 0.2884809758868582,
+      "both_paragraphs_recovered": 0.707
+    },
+    {
+      "config": "recall-tuned: cap=1,max=6",
+      "P": 0.24495,
+      "R": 0.6020285714285715,
+      "F1": 0.34102705072705075,
+      "both_paragraphs_recovered": 0.753
+    },
+    {
+      "config": "balanced: cap=1,max=4",
+      "P": 0.3278333333333333,
+      "R": 0.5512190476190476,
+      "F1": 0.4043874458874459,
+      "both_paragraphs_recovered": 0.604
+    },
+    {
+      "config": "balanced: cap=2,max=3",
+      "P": 0.4086666666666666,
+      "R": 0.5216761904761905,
+      "F1": 0.4518190476190476,
+      "both_paragraphs_recovered": 0.421
+    },
+    {
+      "config": "precision-tuned: cap=2,max=2",
+      "P": 0.5135,
+      "R": 0.4400928571428571,
+      "F1": 0.4676650793650794,
+      "both_paragraphs_recovered": 0.275
     }
   ],
   "scale": {
@@ -90,14 +129,36 @@
     "total_nodes": 33000,
     "probe_count": 200,
     "avg_ondemand_load_fraction": 0.00030303030303030303,
-    "avg_recall_at_scale": 0.5175,
-    "avg_compiled_tokens_uncapped": 1085203.205,
-    "max_compiled_tokens_uncapped": 1197004,
-    "avg_compiled_tokens_capped": 399.45,
-    "max_compiled_tokens_capped": 458,
-    "token_budget": 400
+    "avg_compiled_tokens_uncapped": 1083991.6,
+    "max_compiled_tokens_uncapped": 1205463,
+    "token_budget_sweep": [
+      {
+        "token_budget": 400,
+        "avg_recall": 0.52125,
+        "avg_tokens": 433.345,
+        "max_tokens": 500
+      },
+      {
+        "token_budget": 1500,
+        "avg_recall": 0.6355833333333333,
+        "avg_tokens": 1677.665,
+        "max_tokens": 1756
+      },
+      {
+        "token_budget": 4000,
+        "avg_recall": 0.69975,
+        "avg_tokens": 2560.435,
+        "max_tokens": 3424
+      },
+      {
+        "token_budget": 8000,
+        "avg_recall": 0.69975,
+        "avg_tokens": 2560.435,
+        "max_tokens": 3424
+      }
+    ]
   },
   "timing_sec": {
-    "quality_eval": 3.3
+    "quality_eval": 3.1
   }
 }

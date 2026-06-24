@@ -158,12 +158,18 @@ def run_scale(rows, n_pool, n_probe, cfg_budget):
     budgets = [400, 1500, 4000, 8000]
     budget_stats = {b: {"recall": [], "tokens": []} for b in budgets}
 
+    cfg_normal = SpreadingActivationConfig(**{**cfg_budget.__dict__,
+                                              "max_results": 10, "token_budget": None})
     for q_idx, row in probe:
         gold = {(q_idx, t, s) for (t, s) in gold_set(row)}
+        # on-demand load cost under NORMAL operation (max_results=10): content is
+        # materialized only for the final capped survivors, not the fired graph.
         mem.store.reset_counter()
+        mem.retrieve(row["question"], cfg_normal)
+        loads_frac.append(mem.store.loads / total_nodes)
+        # uncapped retrieval purely to show the context blow-up magnitude
         fired_u = mem.retrieve(row["question"], cfg_uncapped)
         uncapped_tokens.append(estimate_tokens(mem.compile_to_markdown(fired_u)))
-        loads_frac.append(mem.store.loads / total_nodes)  # load cost of normal-ish op
         for b in budgets:
             cfg_b = SpreadingActivationConfig(**{**cfg_budget.__dict__,
                                                  "token_budget": b, "max_results": 60})
