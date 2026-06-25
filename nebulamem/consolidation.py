@@ -1,19 +1,21 @@
-"""Memory consolidation ("dreaming") — extractive, no LLM.
+"""Memory consolidation ("dreaming") — extractive by default, LLM-pluggable.
 
 The blueprint's dreaming phase wanted a "lightweight LLM" to rewrite redundant
-facts. With no model available we keep the useful half — keeping the graph clean
-— using purely set-based algorithms:
+facts. Two modes:
 
-  * forgetting: decay non-inhibitory edge weights toward the floor;
-  * deduplication: collapse near-duplicate nodes (high token-Jaccard within an
-    entity cluster) into a single representative, rewiring their edges;
-  * pruning: drop edges that have decayed below the minimum weight.
+  * default (no model): forgetting (edge decay), deduplication (collapse near-
+    duplicate nodes by token-Jaccard within an entity cluster), pruning.
+  * optional `llm` callable: abstractive consolidation — rewrite a cluster of
+    related/duplicate memories into one clean atomic fact. This is the ideal job
+    for a small *local* on-device model (e.g. OpenBMB MiniCPM-1B): it runs
+    ASYNC/offline, is not latency-critical, and extraction/summarization is well
+    within a 1B model's reach. Per-query retrieval stays model-free.
 
-Abstractive rewriting (true summarization) is intentionally out of scope without
-a model; this preserves "记忆图谱极度清爽" without hallucinating new text.
+`llm` is any callable `str -> str` (prompt -> completion); plug llama.cpp /
+transformers / an API as you like.
 """
 import logging
-from typing import Dict, List, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .text import tokenize
 
@@ -21,12 +23,36 @@ logger = logging.getLogger("nebulamem.consolidation")
 
 
 class MemoryConsolidator:
-    def __init__(self, mem, dedup_threshold: float = 0.82):
+    def __init__(self, mem, dedup_threshold: float = 0.82,
+                 llm: Optional[Callable[[str], str]] = None):
         self.mem = mem
         self.dedup_threshold = dedup_threshold
+        self.llm = llm  # optional local model (e.g. MiniCPM-1B) for async rewrite
 
     def decay(self, idle_seconds: float, decay_rate: float = 0.005) -> None:
         self.mem.graph.decay_weights(idle_seconds, decay_rate)
+
+    def abstract_cluster(self, node_ids: List[str]) -> Optional[str]:
+        """Rewrite a set of related memories into one clean atomic fact using the
+        pluggable local LLM. Returns None if no `llm` is configured."""
+        if self.llm is None:
+            return None
+        facts = [self.mem.store.get(n) or "" for n in node_ids]
+        facts = [f for f in facts if f.strip()]
+        if not facts:
+            return None
+        joined = "\n".join(f"- {f}" for f in facts)
+        prompt = (
+            "Merge these related memory facts into ONE concise, factual sentence. "
+            "Keep only the most up-to-date information; drop duplicates and "
+            "contradictions in favor of the newest. Output only the sentence.\n\n"
+            f"{joined}\n\nMerged fact:"
+        )
+        try:
+            return self.llm(prompt).strip()
+        except Exception as e:  # never let dreaming crash the host
+            logger.warning("LLM consolidation failed, keeping extractive: %s", e)
+            return None
 
     @staticmethod
     def _jaccard(a: Set[str], b: Set[str]) -> float:
