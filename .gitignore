@@ -19,3 +19,4 @@ env/
 bench/run.log
 scratchpad/
 bench/code_run.log
+bench/*.log
